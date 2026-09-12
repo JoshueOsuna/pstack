@@ -93,7 +93,7 @@ Two items that disagree with each other, with both citations.
 What you searched for and didn't find. Be specific: "Searched the issue tracker for [query] across [time range]. No matching issues." These absences are valuable data.
 
 ### Additional Leads
-Anything that suggests further investigation in a different source. For example, if a PR references a chat thread that wasn't in your source, note it so the real-time team chat investigator or a follow-up pass can pick it up.
+Anything that suggests further investigation in a different source. For example, if a PR references a chat thread that wasn't in your source, note it so the real-time team chat investigator or a follow-up pass can pursue it.
 
 ## What You're Not Doing
 
