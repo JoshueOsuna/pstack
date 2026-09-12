@@ -57,7 +57,7 @@ The full contract is on the [overnight page](./07-overnight.md). The short form 
 Steering prompts are one line:
 
 ```text
-I said the goal is to repro. i did not ask for a fix yet.
+i said the goal is to repro. i did not ask for a fix yet.
 ```
 
 ```text
