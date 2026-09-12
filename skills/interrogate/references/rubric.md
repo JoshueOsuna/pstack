@@ -1,82 +1,77 @@
 # Review Rubric
 
-Score each dimension 1-5. 1 is broken, 5 is something you'd point at in a promo packet. 3 is fine — ship it, file the rest as follow-ups.
+Review through whichever lenses are relevant. Not every lens applies to every change. Use judgment.
 
-The number is a communication tool, not a grade. The comments are what matter. If you catch yourself writing "3" for everything, you're not looking.
+## Correctness
 
-## Dimensions
+Does the code actually do what the intent says it should?
 
-### Correctness — does it do what it claims?
+- Edge cases: empty inputs, nil/undefined, boundary values, concurrent access
+- Error handling: are errors caught, propagated, or silently swallowed?
+- Off-by-one, type coercion, integer overflow, string encoding
+- State management: race conditions, stale closures, dangling references
+- Does the happy path work? Does the sad path work?
+- Idempotency: what happens if this operation runs twice, or if a previous run crashed halfway? If the answer is "it depends on what state was left behind," there's a missing reconciliation step.
+- Concurrency: if multiple actors can touch the same mutable state (files, branches, shared data), is access serialized structurally (locks, sequential phases, exclusive ownership), or by conventions that won't hold?
 
-- **1:** Doesn't work. Wrong output, crashes, fails the author's own tests. Or the tests pass and the feature is still wrong because the tests test the mocks.
-- **2:** Works for the happy path the author tried. Breaks on empty input, missing fields, the other user's data, or the thing the ticket mentioned in paragraph 3.
-- **3:** Does what the ticket says. Edge cases exist but they're documented or tracked. You'd ship this.
-- **4:** Handles the cases a careful engineer would think of. Errors are specific. Invalid states are unrepresentable. The tests would catch a regression in the thing this PR is about.
-- **5:** Correct in ways that required understanding the problem, not just the ticket. The kind of code where the bug report comes in six months and you look at it and go "no, that's handled."
+When you find a potential bug, trace the execution path. Don't just flag "this could be nil". Show the call chain that makes it nil.
 
-### Design — will this still make sense in six months?
+## Root Causes vs. Symptoms
 
-- **1:** Wrong abstraction. The new code fights the existing architecture, or invents a parallel one. You'll rewrite this. Not "might rewrite" — will.
-- **2:** Works but the shape is off. Responsibilities are confused (this function does I/O and formatting and validation), or the new type duplicates one that exists, or the API will need breaking changes the moment a second consumer appears.
-- **3:** Fits. A new teammate could find the right file and make a change without first attending a meeting about "how we do things." The module has a reason to exist.
-- **4:** Improves the design of the surrounding code. Deletes more than it adds, or makes the next feature obvious. The kind of change that makes the file *after* the PR better than the file *before*, not just different.
-- **5:** Changes how you'll approach the next three problems. You'd send this PR to someone and say "this is how we do X now."
+Is the code fixing the actual problem or papering over a symptom?
 
-### Scope — is this the right amount of change?
+Answering this often requires looking beyond the changed files. Read the surrounding code (callers, callees, type definitions, sibling modules) and understand the architecture the change lives in. Use the tools available to you (Read, Grep, Glob) to explore. Follow the call chain. Read the types. Understand why the code exists before judging whether the change addresses the right layer.
 
-- **1:** Can't tell what this PR is about. Mixes a feature, a refactor, a dependency bump, and a drive-by rename. Or it's 2,000 lines that should have been four PRs. Review is theater because nobody can actually hold this in their head.
-- **2:** There's a real change in here but it's padded. Unrelated files, leftover debug, a refactor that isn't needed for the thing being shipped. The description says "also cleaned up a few things."
-- **3:** One thing. The diff is the size it needs to be. You could revert this PR and the rest of the codebase wouldn't notice, which is the point of a PR.
-- **4:** Tight. Every file is there because it has to be. The author clearly asked "do I need this" and the answer was no more than once. Commit history is coherent enough that `git bisect` would land on a useful commit.
-- **5:** Surgical. You look at the diff and understand the whole change in one sitting. Nothing you'd cut. Nothing you'd add. The PR description is shorter than the diff and that's correct.
+- Guard clauses that mask a deeper invariant violation
+- Retry logic that hides a broken contract
+- Type casts that silence a modeling error
+- If you see a workaround, ask: why is the workaround needed? What would a proper fix look like?
+- A fix in module A that should really be a fix in module B's contract
+- Instructions where structure would be better: if the fix is a comment saying "don't do X" or a convention someone has to remember, ask whether it could instead be a type constraint, a lint rule, or a runtime check that makes the wrong thing impossible
 
-### Tests — will we know if this breaks?
+## Structural Integrity
 
-- **1:** No tests, or tests that assert mocks were called, or tests that pass when the feature is broken. Coverage theater. The test file exists so the CI check is green.
-- **2:** Tests exist for the happy path. They'd catch a rename. They wouldn't catch a logic error, an off-by-one, or the bug this PR is supposedly fixing. Fixtures are so specific that any code change breaks the test without the behavior changing.
-- **3:** Tests cover the behavior this PR introduces, including the failure case. A future change that broke this feature would fail a test with a name you'd understand. That's the bar.
-- **4:** Tests are documentation. You could delete the implementation comments and the tests would tell you what this module does and what it refuses to do. Edge cases have names like `rejects expired tokens` not `test7`.
-- **5:** The tests made you understand the feature better than the PR description did. They encode the invariants. They're the reason you're confident shipping this on a Friday.
+Does the code fit well into the system it's part of?
 
-### Operations — can we run this, debug it, and survive it breaking?
+- Boundary discipline: is validation at system boundaries, or scattered through business logic? Validate data once where it enters the system, then trust it internally.
+- Abstraction level: is the code mixing high-level orchestration with low-level detail?
+- Coupling: does this change introduce dependencies that will make future changes harder?
+- Data model fit: do the data structures match the actual access patterns? The right structure makes downstream code obvious. The wrong one fights you at every turn.
+- Bolted-on vs. integrated: was the change patched onto the existing design, or does it read as if the design always accounted for it? If the new requirement had been known from the start, would the code look like this?
+- Legacy dual-paths: does the change introduce a new API while keeping the old one alive? If there are no external consumers, migrate callers and delete the old path in the same wave. Don't leave compatibility layers that will become permanent.
 
-- **1:** No thought given. Unbounded query, no timeout, no error handling, secrets in the diff, a migration that locks the table. This will page someone and they won't know why.
-- **2:** It'll run. It'll also be mysterious when it doesn't. No logs at the decision points, no metric for the thing this feature exists to do, errors swallowed or rethrown as `Internal Server Error`. The dashboard won't show this.
-- **3:** Runnable. Errors surface. There's a log or a metric at the boundary (request came in, job finished, user-visible failure). You could debug a production incident involving this code without first adding instrumentation.
-- **4:** Observable by design. Feature-flagged if it's risky. Rollback is `revert` or flip a flag, not "deploy the previous SHA and hope the migration is backwards-compatible." Alerts would fire on the failure mode that actually matters, not on CPU.
-- **5:** You'd let this run unattended. The failure modes were named in the PR. There's a runbook, or the code is so straightforward you wouldn't need one. Capacity, backpressure, and "what if the dependency is down" were answered before you asked.
+Don't penalize simple code for lacking abstraction. Premature abstraction is worse than duplication.
 
-## How to use this
+## Verification
 
-You are not averaging these into a score. You're using them to force a conversation about the dimension that's actually the problem.
+Can you tell that this code works from reading it?
 
-Most PRs that feel "off" are a 2 in one dimension and a 3-4 in the others. Name the 2. That's the review. "Looks good but the tests wouldn't catch the bug this is fixing" is a better review than five paragraphs of nits about naming.
+- Are there tests? Do they test behavior or implementation details?
+- Are there assertions/invariants that would catch regressions?
+- If this is a bug fix: is there a test for the bug?
+- If this touches an integration boundary: is the full path tested?
+- Check the real thing, not a proxy. If the code checks liveness via file mtime or cached state instead of reading the actual value, that's a verification gap.
+- For delegated or async work: does the code verify actual output artifacts, or does it trust self-reports and summaries?
 
-A 1 in any dimension is a request for changes, not a suggestion. A 2 is "I would like this fixed, here's why, I'll defer to you if you disagree with a reason." A 3+ ships.
+## Complexity Budget
 
-Don't score a dimension you didn't look at. "Tests: 3" on a PR you didn't run the tests for is a lie. Write "not evaluated" instead.
+Is the complexity justified by what the code accomplishes?
 
-## Output
+- Code that could be simpler without losing correctness or clarity
+- Abstractions that serve only one call site
+- Configuration or parameterization for cases that don't exist yet
+- Dead code, unused imports, vestigial parameters
+- Over-engineering: "just in case" code paths with no current callers
+- Obsolete compatibility paths kept alive for transitional stability that's no longer needed. If the migration is done, delete the scaffolding
+- Does the user experience justify the complexity? Every feature, control, and option should earn its place. Half-finished features are worse than missing ones.
 
-After walking the dimensions (and after the other reviewers have gone — you are last):
+Simpler is better unless simpler is wrong. Three lines of duplication beat a premature abstraction.
 
-```
-## Verdict: [SHIP / FIX THEN SHIP / REWORK]
+## Security
 
-### Scores
-- Correctness: N — [one sentence]
-- Design: N — [one sentence]
-- Scope: N — [one sentence]
-- Tests: N — [one sentence]
-- Operations: N — [one sentence]
+Only flag security issues you can actually trace through the code. "This could be an injection vector" without showing the input path is not useful.
 
-### What would change my mind
-[The one thing that, if addressed, would move a FIX to a SHIP, or a REWORK to a FIX. If it's SHIP, skip this.]
-
-### Notes
-[Anything that didn't fit a dimension. Praise belongs here too.]
-```
-
-SHIP: merge it. FIX THEN SHIP: specific, bounded changes; don't start over. REWORK: the approach is wrong; talking about line comments is a waste of everyone's time until the shape changes.
-
-If you write REWORK, you owe an alternative. "This isn't it" without "here's the shape that would be" is just a veto.
+- User input flowing to dangerous sinks (SQL, shell, eval, innerHTML) without sanitization
+- Authentication/authorization gaps in new endpoints
+- Secrets in code, logs, or error messages
+- TOCTOU (time-of-check-time-of-use) in security-critical paths
