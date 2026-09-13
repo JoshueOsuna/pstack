@@ -75,6 +75,7 @@ Your GitHub account is [JoshueOsuna](https://github.com/JoshueOsuna). You had no
    - pstack lives at [`plugins/pstack`](https://github.com/JoshueOsuna/plugins/tree/main/pstack)
 2. **Dedicated public pstack repo** (this plugin only, for day-to-day use):
    - https://github.com/JoshueOsuna/pstack
+   - Guide screenshots (`docs/guide/images` and `assets/logo.png`) are in the plugins fork and in this Cursor checkout. Use `JoshueOsuna/plugins/pstack` if you want a byte-identical tree including those binaries.
 
 Download the dedicated copy:
 
