@@ -197,7 +197,6 @@ export interface Store {
     readonly push: (params: PushInboxParams) => Promise<InboxPushResult>;
     readonly drain: () => Promise<readonly InboxPointer[]>;
     readonly peek: () => Promise<readonly InboxPointer[]>;
-    readonly peek: () => Promise<readonly InboxPointer[]>;
     readonly count: () => Promise<number>;
   };
   readonly gates: {
@@ -235,3 +234,362 @@ export class NotFoundError extends UserError {
     super(message);
   }
 }
+
+function errorCode(error: unknown): string | null {
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
+}
+
+function verdictOrNull(value: string): Verdict | null {
+  switch (value) {
+    case "live-ui-verified":
+    case "unit-test-verified":
+    case "type-check-only":
+    case "verifier-blocked":
+    case "verifier-failed":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function frontierPrStateOrNull(value: unknown): FrontierPrState | null {
+  switch (value) {
+    case "OPEN":
+    case "MERGED":
+    case "CLOSED":
+      return value;
+    default:
+      return null;
+  }
+}
+
+export function parseVerdict(value: string): Verdict {
+  const verdict = verdictOrNull(value);
+  if (verdict === null) {
+    throw new UserError(
+      "verdict must be live-ui-verified, unit-test-verified, type-check-only, verifier-blocked, or verifier-failed"
+    );
+  }
+  return verdict;
+}
+
+function cleanCell(value: string): string {
+  const cleaned = value.replace(/[\t\n\r]/g, " ");
+  return /^[=+\-@]/.test(cleaned) ? `'${cleaned}` : cleaned;
+}
+
+function requiredCell(value: string, label: string): string {
+  const cleaned = cleanCell(value);
+  if (cleaned.trim().length === 0) {
+    throw new UserError(`${label} must not be empty`);
+  }
+  return cleaned;
+}
+
+function requiredLine(value: string, label: string): string {
+  const cleaned = value.replace(/[\n\r]/g, " ").trim();
+  if (cleaned.length === 0) {
+    throw new UserError(`${label} must not be empty`);
+  }
+  return cleaned;
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new UserError(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function atomicWrite(path: string, contents: string): Promise<void> {
+  const temporary = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`
+  );
+  try {
+    await writeFile(temporary, contents, { flag: "wx" });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function writeIfMissing(path: string, contents: string): Promise<void> {
+  if (!(await exists(path))) {
+    await atomicWrite(path, contents);
+  }
+}
+
+async function requiredFile(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      throw new UserError(
+        `store is not initialized at ${dirname(path)}; run orch init`
+      );
+    }
+    throw error;
+  }
+}
+
+function holderIsDead(holder: string): boolean {
+  const pid = Number.parseInt(holder, 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || String(pid) !== holder) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return errorCode(error) === "ESRCH";
+  }
+}
+
+async function acquireLock(
+  store: string,
+  options: OpenStoreOptions
+): Promise<() => Promise<void>> {
+  const path = join(store, LOCK_FILE);
+  const pid = String(process.pid);
+  const create = async (): Promise<void> => {
+    const handle = await open(path, "wx");
+    await handle.writeFile(`${pid}\n`);
+    await handle.close();
+  };
+
+  const takeOver = async (): Promise<void> => {
+    await unlink(path);
+    try {
+      await create();
+    } catch (retryError) {
+      if (errorCode(retryError) === "EEXIST") {
+        const retryHolder =
+          (await readFile(path, "utf8")).trim() || "unknown";
+        throw new UserError(`store lock held by pid ${retryHolder}`);
+      }
+      throw retryError;
+    }
+  };
+
+  try {
+    await create();
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") {
+      throw error;
+    }
+    let holder = "unknown";
+    try {
+      holder = (await readFile(path, "utf8")).trim() || "unknown";
+    } catch {
+      holder = "unknown";
+    }
+    if (holderIsDead(holder)) {
+      options.onStaleLock?.(holder);
+      await takeOver();
+    } else if (options.force) {
+      options.onLockStolen?.(holder);
+      await takeOver();
+    } else {
+      throw new UserError(`store lock held by pid ${holder}`);
+    }
+  }
+
+  return async (): Promise<void> => {
+    try {
+      if ((await readFile(path, "utf8")).trim() === pid) {
+        await unlink(path);
+      }
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        throw error;
+      }
+    }
+  };
+}
+
+async function readTsv(
+  path: string,
+  header: string,
+  width: number
+): Promise<readonly (readonly string[])[]> {
+  const lines = (await requiredFile(path)).replace(/\r/g, "").split("\n");
+  if (lines.shift() !== header) {
+    throw new UserError(`${basename(path)} has an invalid header`);
+  }
+  return lines
+    .filter((value) => value.length > 0)
+    .map((value) => {
+      const cells = value.split("\t");
+      if (cells.length !== width) {
+        throw new UserError(`${basename(path)} has a malformed row`);
+      }
+      return cells;
+    });
+}
+
+async function writeTsv(
+  path: string,
+  header: string,
+  rows: readonly (readonly string[])[]
+): Promise<void> {
+  const body = rows.map((row) => row.map(cleanCell).join("\t")).join("\n");
+  await atomicWrite(path, `${header}\n${body}${body.length > 0 ? "\n" : ""}`);
+}
+
+async function readUnits(store: string): Promise<readonly Unit[]> {
+  return (await readTsv(join(store, "units.tsv"), UNIT_HEADER, 7)).map(
+    (row) => ({
+      id: row[0] ?? "",
+      track: row[1] ?? "",
+      state: row[2] ?? "",
+      branch: row[3] ?? "",
+      pr: row[4] ?? "",
+      sha: row[5] ?? "",
+      brief: row[6] ?? "",
+    })
+  );
+}
+
+function unitCells(unit: Unit): readonly string[] {
+  return [
+    unit.id,
+    unit.track,
+    unit.state,
+    unit.branch,
+    unit.pr,
+    unit.sha,
+    unit.brief,
+  ];
+}
+
+async function saveUnits(store: string, rows: readonly Unit[]): Promise<void> {
+  await writeTsv(
+    join(store, "units.tsv"),
+    UNIT_HEADER,
+    rows.map(unitCells)
+  );
+}
+
+async function readLedger(store: string): Promise<readonly LedgerEntry[]> {
+  return (await readTsv(join(store, "ledger.tsv"), LEDGER_HEADER, 6)).map(
+    (row) => {
+      const rawVerdict = row[2] ?? "";
+      const verdict = verdictOrNull(rawVerdict);
+      if (verdict === null) {
+        throw new UserError(`ledger.tsv has invalid verdict ${rawVerdict}`);
+      }
+      return {
+        pr: row[0] ?? "",
+        sha: row[1] ?? "",
+        verdict,
+        evidence: row[3] ?? "",
+        verifier: row[4] ?? "",
+        ts: row[5] ?? "",
+      };
+    }
+  );
+}
+
+function ledgerCells(row: LedgerEntry): readonly string[] {
+  return [
+    row.pr,
+    row.sha,
+    row.verdict,
+    row.evidence,
+    row.verifier,
+    row.ts,
+  ];
+}
+
+async function saveLedger(
+  store: string,
+  rows: readonly LedgerEntry[]
+): Promise<void> {
+  await writeTsv(
+    join(store, "ledger.tsv"),
+    LEDGER_HEADER,
+    rows.map(ledgerCells)
+  );
+}
+
+function pointerCells(pointer: InboxPointer): readonly string[] {
+  return [
+    pointer.ts,
+    pointer.agent,
+    pointer.unit,
+    pointer.status,
+    pointer.report,
+  ];
+}
+
+async function readPointers(
+  directory: string
+): Promise<readonly InboxPointer[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      throw new UserError(
+        `store is not initialized at ${dirname(directory)}; run orch init`
+      );
+    }
+    throw error;
+  }
+  const result: InboxPointer[] = [];
+  const files = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".tsv"))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of files) {
+    const raw = (await readFile(join(directory, entry.name), "utf8")).replace(
+      /\r?\n$/,
+      ""
+    );
+    const row = raw.split("\t");
+    if (/[\r\n]/.test(raw) || row.length !== 5) {
+      throw new UserError(`inbox pointer ${entry.name} is malformed`);
+    }
+    result.push({
+      ts: row[0] ?? "",
+      agent: row[1] ?? "",
+      unit: row[2] ?? "",
+      status: row[3] ?? "",
+      report: row[4] ?? "",
+    });
+  }
+  return result;
+}
+
