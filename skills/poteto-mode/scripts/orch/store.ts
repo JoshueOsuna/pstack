@@ -197,6 +197,7 @@ export interface Store {
     readonly push: (params: PushInboxParams) => Promise<InboxPushResult>;
     readonly drain: () => Promise<readonly InboxPointer[]>;
     readonly peek: () => Promise<readonly InboxPointer[]>;
+    readonly peek: () => Promise<readonly InboxPointer[]>;
     readonly count: () => Promise<number>;
   };
   readonly gates: {
@@ -217,4 +218,20 @@ export interface Store {
   };
   readonly init: () => Promise<{ readonly store: string }>;
   readonly close: () => Promise<void>;
+}
+
+export interface NotFoundOutput {
+  readonly compact: string;
+  readonly json: unknown;
+}
+
+export class UserError extends Error {}
+export class UsageError extends UserError {}
+export class NotFoundError extends UserError {
+  public constructor(
+    message: string,
+    public readonly output?: NotFoundOutput
+  ) {
+    super(message);
+  }
 }
